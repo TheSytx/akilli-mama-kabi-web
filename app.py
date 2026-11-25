@@ -224,7 +224,7 @@ st.markdown(
         color: var(--text-color);
     }
 
-    /* Tek Parça Durum Kartı (Rozetler + Yenile Aynı Kutu İçinde) */
+    /* Tek Parça Durum Kartı (Rozetler + Yenile Aynı Kutu İçinde Tam Ortalanmış) */
     .st-key-status_bar_container {
         background: var(--secondary-background-color) !important;
         border: 1px solid rgba(148, 163, 184, 0.2) !important;
@@ -232,11 +232,32 @@ st.markdown(
         padding: 10px 14px !important;
         margin-top: 4px;
     }
+    .st-key-status_bar_container > div,
+    .st-key-status_bar_container [data-testid="stVerticalBlock"],
+    .st-key-status_bar_container [data-testid="stColumn"] > div {
+        gap: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        justify-content: center !important;
+    }
+    .st-key-status_bar_container [data-testid="stHorizontalBlock"] {
+        align-items: center !important;
+    }
+    .st-key-status_bar_container [data-testid="stElementContainer"],
+    .st-key-status_bar_container [data-testid="stMarkdown"],
+    .st-key-status_bar_container [data-testid="stMarkdownContainer"],
+    .st-key-status_bar_container [data-testid="stMarkdownContainer"] p {
+        margin: 0 !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+    }
     .pills-wrap {
         display: flex;
         align-items: center;
         flex-wrap: wrap;
         gap: 8px;
+        min-height: 36px;
     }
     .status-pill {
         display: inline-flex;
