@@ -136,7 +136,7 @@ def get_mqtt_manager(broker: str, port: int, topic_prefix: str) -> MqttFeederMan
     deadline = time.time() + 2.0
     while not manager.broker_connected and time.time() < deadline:
         time.sleep(0.1)
-    time.sleep(0.2)
+    time.sleep(0.25)
     return manager
 
 
@@ -150,15 +150,20 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    /* Şifre kutusunu HTML type="text" tutup görsel olarak maskele (1Password / şifre yöneticilerini engeller) */
+    input[aria-label="Erişim Kodu"] {
+        -webkit-text-security: disc !important;
+        text-security: disc !important;
+    }
     .header-box {
         display: flex;
         align-items: center;
         gap: 12px;
-        margin-bottom: 8px;
+        margin-bottom: 6px;
     }
     .logo-badge {
-        width: 48px;
-        height: 48px;
+        width: 46px;
+        height: 46px;
         border-radius: 14px;
         background: rgba(16, 185, 129, 0.14);
         border: 1px solid rgba(16, 185, 129, 0.35);
@@ -167,28 +172,69 @@ st.markdown(
         justify-content: center;
         font-size: 24px;
     }
+    .status-strip {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 16px;
+        padding: 12px 14px;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    .pill-green {
+        background: rgba(16, 185, 129, 0.14);
+        border: 1px solid rgba(16, 185, 129, 0.35);
+        color: #10B981;
+    }
+    .pill-amber {
+        background: rgba(245, 158, 11, 0.14);
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        color: #F59E0B;
+    }
+    .pill-red {
+        background: rgba(239, 68, 68, 0.14);
+        border: 1px solid rgba(239, 68, 68, 0.35);
+        color: #EF4444;
+    }
+    .pill-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        display: inline-block;
+    }
     .status-card {
         background: var(--secondary-background-color);
-        border-radius: 22px;
-        padding: 28px 20px;
+        border-radius: 24px;
+        padding: 26px 20px;
         text-align: center;
-        margin: 14px 0 20px 0;
+        margin: 14px 0 18px 0;
     }
     .status-open {
-        border: 2px solid rgba(16, 185, 129, 0.6);
+        border: 2px solid rgba(16, 185, 129, 0.55);
     }
     .status-closed {
-        border: 2px solid rgba(245, 158, 11, 0.55);
+        border: 2px solid rgba(245, 158, 11, 0.5);
     }
     .circle-badge {
-        width: 110px;
-        height: 110px;
-        border-radius: 55px;
+        width: 116px;
+        height: 116px;
+        border-radius: 58px;
         margin: 0 auto 14px auto;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 44px;
+        font-size: 46px;
     }
     .circle-open {
         background: rgba(16, 185, 129, 0.14);
@@ -197,18 +243,6 @@ st.markdown(
     .circle-closed {
         background: rgba(245, 158, 11, 0.14);
         border: 3px solid #F59E0B;
-    }
-    .pill-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        background: var(--secondary-background-color);
-        border: 1px solid rgba(148, 163, 184, 0.25);
-        border-radius: 14px;
-        padding: 12px 16px;
-        margin-bottom: 12px;
-        flex-wrap: wrap;
-        gap: 8px;
     }
     .metrics-bar {
         display: flex;
@@ -223,11 +257,31 @@ st.markdown(
     }
     .muted-text {
         color: var(--text-color);
-        opacity: 0.7;
+        opacity: 0.72;
     }
-    div.stButton > button, div.stFormSubmitButton > button {
-        border-radius: 14px;
-        padding: 0.75rem 1rem;
+    .loading-card {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        border-radius: 22px;
+        padding: 42px 24px;
+        text-align: center;
+        margin-top: 48px;
+    }
+    .spinner-ring {
+        width: 44px;
+        height: 44px;
+        border: 4px solid rgba(16, 185, 129, 0.2);
+        border-top-color: #10B981;
+        border-radius: 50%;
+        margin: 18px auto 12px auto;
+        animation: kapspin 0.85s linear infinite;
+    }
+    @keyframes kapspin {
+        to { transform: rotate(360deg); }
+    }
+    div.stButton > button {
+        border-radius: 16px;
+        padding: 0.78rem 1rem;
         font-weight: 700;
         font-size: 15px;
     }
@@ -238,34 +292,80 @@ st.markdown(
 
 MQTT_BROKER, MQTT_PORT, TOPIC_PREFIX, APP_PASSWORD = load_secrets()
 
-# --- Basit Giriş Ekranı ---
+# --- Oturum Durumları ---
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+if "is_loading_panel" not in st.session_state:
+    st.session_state.is_loading_panel = False
+if "login_error" not in st.session_state:
+    st.session_state.login_error = False
 
+
+def try_login() -> None:
+    entered = st.session_state.get("access_code_input", "")
+    if not entered:
+        return
+    if hmac.compare_digest(entered, APP_PASSWORD):
+        st.session_state.authenticated = True
+        st.session_state.is_loading_panel = True
+        st.session_state.login_error = False
+        st.session_state.access_code_input = ""
+    else:
+        st.session_state.login_error = True
+
+
+# --- 1. Basit Giriş Ekranı (Şifre yöneticisi tetiklemeyen yapı) ---
 if not st.session_state.authenticated:
     st.markdown("### 🐾 Giriş")
 
-    with st.form("login_form"):
-        password = st.text_input(
-            "Şifre",
-            type="password",
-            placeholder="Şifreyi giriniz...",
-        )
-        submitted = st.form_submit_button(
-            "Giriş Yap", use_container_width=True, type="primary"
-        )
+    st.text_input(
+        "Erişim Kodu",
+        key="access_code_input",
+        type="default",
+        autocomplete="off",
+        placeholder="Şifreyi giriniz...",
+        on_change=try_login,
+    )
 
-    if submitted:
-        if hmac.compare_digest(password, APP_PASSWORD):
-            st.session_state.authenticated = True
+    if st.button("Giriş Yap", use_container_width=True, type="primary"):
+        try_login()
+        if st.session_state.authenticated:
             st.rerun()
-        else:
-            st.error("Hatalı şifre.")
+
+    if st.session_state.login_error:
+        st.error("Hatalı şifre.")
 
     st.stop()
 
 
-# --- Ana Kontrol Paneli ---
+# --- 2. Giriş Sonrası Temiz Yüklenme (Loading) Ekranı ---
+if st.session_state.is_loading_panel:
+    placeholder = st.empty()
+    placeholder.markdown(
+        """
+        <div class="loading-card">
+            <div style="font-size:44px;">🐾</div>
+            <div class="spinner-ring"></div>
+            <div style="font-size:18px; font-weight:700; margin-top:8px;">
+                Kontrol Paneli Hazırlanıyor
+            </div>
+            <div class="muted-text" style="font-size:13px; margin-top:6px;">
+                İletişim sunucusuna bağlanılıyor ve cihaz durumu alınıyor...
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    # Bağlantıyı kur ve kısa yumuşak geçiş sağla
+    mgr = get_mqtt_manager(MQTT_BROKER, MQTT_PORT, TOPIC_PREFIX)
+    mgr.send_command("durum")
+    time.sleep(0.55)
+    st.session_state.is_loading_panel = False
+    placeholder.empty()
+    st.rerun()
+
+
+# --- 3. Ana Kontrol Paneli ---
 manager = get_mqtt_manager(MQTT_BROKER, MQTT_PORT, TOPIC_PREFIX)
 
 header_col, logout_col = st.columns([4, 1])
@@ -283,6 +383,7 @@ with logout_col:
     st.write("")
     if st.button("🚪 Çıkış", use_container_width=True):
         st.session_state.authenticated = False
+        st.session_state.is_loading_panel = False
         st.rerun()
 
 
@@ -291,29 +392,54 @@ def render_live_status():
     state = manager.snapshot()
     is_open = state["kapak"] == "acik"
 
-    broker_dot = "🟢" if state["broker_connected"] else "🟡"
-    broker_text = (
-        "İletişim sunucusu bağlı"
-        if state["broker_connected"]
-        else "İletişim sunucusuna bağlanılıyor..."
-    )
+    if state["broker_connected"]:
+        server_pill = (
+            '<span class="status-pill pill-green">'
+            '<span class="pill-dot" style="background:#10B981;"></span>'
+            'İletişim sunucusu bağlı'
+            '</span>'
+        )
+    else:
+        server_pill = (
+            '<span class="status-pill pill-amber">'
+            '<span class="pill-dot" style="background:#F59E0B;"></span>'
+            'Sunucuya bağlanılıyor...'
+            '</span>'
+        )
 
     if state["device_online"] == "online":
-        device_badge = '<span style="color:#10B981; font-weight:700;">● Cihaz Çevrimiçi</span>'
+        device_pill = (
+            '<span class="status-pill pill-green">'
+            '<span class="pill-dot" style="background:#10B981;"></span>'
+            'Cihaz Çevrimiçi'
+            '</span>'
+        )
     elif state["device_online"] == "offline":
-        device_badge = '<span style="color:#EF4444; font-weight:700;">● Cihaz Çevrimdışı</span>'
+        device_pill = (
+            '<span class="status-pill pill-red">'
+            '<span class="pill-dot" style="background:#EF4444;"></span>'
+            'Cihaz Çevrimdışı'
+            '</span>'
+        )
     else:
-        device_badge = '<span style="color:#F59E0B; font-weight:700;">● Cihaz Bekleniyor</span>'
+        device_pill = (
+            '<span class="status-pill pill-amber">'
+            '<span class="pill-dot" style="background:#F59E0B;"></span>'
+            'Cihaz Bekleniyor'
+            '</span>'
+        )
 
-    st.markdown(
-        f"""
-        <div class="pill-row">
-            <div style="font-weight:600; font-size:14px;">{broker_dot} {broker_text}</div>
-            <div style="font-size:13px;">{device_badge}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    strip_col, refresh_col = st.columns([4, 1], vertical_alignment="center")
+    with strip_col:
+        st.markdown(
+            f'<div class="status-strip">{server_pill}{device_pill}</div>',
+            unsafe_allow_html=True,
+        )
+    with refresh_col:
+        if st.button("🔄 Yenile", use_container_width=True):
+            manager.send_command("durum")
+            time.sleep(0.3)
+            st.rerun()
 
     card_cls = "status-open" if is_open else "status-closed"
     circle_cls = "circle-open" if is_open else "circle-closed"
@@ -350,6 +476,11 @@ def render_live_status():
 
 
 render_live_status()
+
+st.markdown(
+    '<div class="muted-text" style="font-size:12px; font-weight:700; letter-spacing:1px; margin-bottom:8px;">KONTROL TUŞLARI</div>',
+    unsafe_allow_html=True,
+)
 
 col1, col2 = st.columns(2)
 
