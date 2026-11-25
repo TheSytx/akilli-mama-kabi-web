@@ -1,0 +1,374 @@
+import hmac
+import json
+import threading
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import paho.mqtt.client as mqtt
+import streamlit as st
+
+TR_TZ = timezone(timedelta(hours=3))
+
+
+def simdi_saat() -> str:
+    return datetime.now(TR_TZ).strftime("%H:%M:%S")
+
+
+def load_secrets() -> tuple[str, int, str, str]:
+    """Gizli ayarları st.secrets içinden güvenli şekilde okur."""
+    try:
+        broker = str(st.secrets.get("MQTT_BROKER", "broker.hivemq.com")).strip()
+        port = int(st.secrets.get("MQTT_PORT", 1883))
+        topic_prefix = str(st.secrets["MQTT_TOPIC_PREFIX"]).strip().strip("/")
+        app_password = str(st.secrets["APP_PASSWORD"])
+        if not topic_prefix or not app_password:
+            raise KeyError("Bos secret degeri")
+        return broker, port, topic_prefix, app_password
+    except Exception:
+        st.error("Uygulama ayarları eksik. Lütfen yöneticinizle iletişime geçin.")
+        st.stop()
+
+
+class MqttFeederManager:
+    """Arka planda tek bir kalıcı MQTT bağlantısı tutan thread-safe yönetici."""
+
+    def __init__(self, broker: str, port: int, topic_prefix: str) -> None:
+        self._lock = threading.Lock()
+        self.broker = broker
+        self.port = port
+        self.topic_komut = f"{topic_prefix}/komut"
+        self.topic_durum = f"{topic_prefix}/durum"
+        self.topic_online = f"{topic_prefix}/online"
+
+        self.broker_connected: bool = False
+        self.device_online: str = "unknown"  # "online" | "offline" | "unknown"
+        self.kapak: str = "kapali"  # "acik" | "kapali"
+        self.aci: int = 0
+        self.last_updated: str = "-"
+
+        client_id = f"streamlit-kap-{uuid.uuid4().hex[:8]}"
+        self.client = mqtt.Client(
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            client_id=client_id,
+            protocol=mqtt.MQTTv311,
+        )
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
+        self.client.reconnect_delay_set(min_delay=1, max_delay=10)
+
+        try:
+            self.client.connect_async(broker, port, keepalive=30)
+            self.client.loop_start()
+        except Exception:
+            pass
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        ok = not reason_code.is_failure
+        with self._lock:
+            self.broker_connected = ok
+
+        if ok:
+            client.subscribe(self.topic_durum)
+            client.subscribe(self.topic_online)
+
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+        with self._lock:
+            self.broker_connected = False
+
+    def _on_message(self, client, userdata, msg):
+        payload = msg.payload.decode("utf-8", errors="ignore").strip()
+        with self._lock:
+            if msg.topic == self.topic_online:
+                val = payload.lower()
+                if val in ("online", "offline"):
+                    self.device_online = val
+                return
+
+            if msg.topic == self.topic_durum:
+                try:
+                    data = json.loads(payload)
+                    kapak = data.get("kapak")
+                    if kapak in ("acik", "kapali"):
+                        self.kapak = kapak
+                        aci = data.get("aci")
+                        self.aci = (
+                            int(aci)
+                            if isinstance(aci, (int, float))
+                            else (180 if kapak == "acik" else 0)
+                        )
+                        self.last_updated = simdi_saat()
+                except Exception:
+                    val = payload.lower()
+                    if val in ("acik", "kapali"):
+                        self.kapak = val
+                        self.aci = 180 if val == "acik" else 0
+                        self.last_updated = simdi_saat()
+
+    def send_command(self, command: str) -> bool:
+        with self._lock:
+            connected = self.broker_connected
+        if not connected:
+            return False
+
+        info = self.client.publish(self.topic_komut, command, qos=0, retain=False)
+        ok = info.rc == mqtt.MQTT_ERR_SUCCESS
+        if ok:
+            with self._lock:
+                self.last_updated = simdi_saat()
+        return ok
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "broker_connected": self.broker_connected,
+                "device_online": self.device_online,
+                "kapak": self.kapak,
+                "aci": self.aci,
+                "last_updated": self.last_updated,
+            }
+
+
+@st.cache_resource
+def get_mqtt_manager(broker: str, port: int, topic_prefix: str) -> MqttFeederManager:
+    manager = MqttFeederManager(broker, port, topic_prefix)
+    deadline = time.time() + 2.0
+    while not manager.broker_connected and time.time() < deadline:
+        time.sleep(0.1)
+    time.sleep(0.2)
+    return manager
+
+
+# --- Sayfa Yapılandırması ve Hem Light Hem Dark Uyumlu Stil ---
+st.set_page_config(
+    page_title="Akıllı Mama Kabı",
+    page_icon="🐾",
+    layout="centered",
+)
+
+st.markdown(
+    """
+    <style>
+    .header-box {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 8px;
+    }
+    .logo-badge {
+        width: 48px;
+        height: 48px;
+        border-radius: 14px;
+        background: rgba(16, 185, 129, 0.14);
+        border: 1px solid rgba(16, 185, 129, 0.35);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+    }
+    .status-card {
+        background: var(--secondary-background-color);
+        border-radius: 22px;
+        padding: 28px 20px;
+        text-align: center;
+        margin: 14px 0 20px 0;
+    }
+    .status-open {
+        border: 2px solid rgba(16, 185, 129, 0.6);
+    }
+    .status-closed {
+        border: 2px solid rgba(245, 158, 11, 0.55);
+    }
+    .circle-badge {
+        width: 110px;
+        height: 110px;
+        border-radius: 55px;
+        margin: 0 auto 14px auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 44px;
+    }
+    .circle-open {
+        background: rgba(16, 185, 129, 0.14);
+        border: 3px solid #10B981;
+    }
+    .circle-closed {
+        background: rgba(245, 158, 11, 0.14);
+        border: 3px solid #F59E0B;
+    }
+    .pill-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 14px;
+        padding: 12px 16px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .metrics-bar {
+        display: flex;
+        justify-content: space-around;
+        background: var(--background-color);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 12px;
+        padding: 10px 14px;
+        margin-top: 16px;
+        font-size: 13px;
+        color: var(--text-color);
+    }
+    .muted-text {
+        color: var(--text-color);
+        opacity: 0.7;
+    }
+    div.stButton > button, div.stFormSubmitButton > button {
+        border-radius: 14px;
+        padding: 0.75rem 1rem;
+        font-weight: 700;
+        font-size: 15px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+MQTT_BROKER, MQTT_PORT, TOPIC_PREFIX, APP_PASSWORD = load_secrets()
+
+# --- Basit Giriş Ekranı ---
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.markdown("### 🐾 Giriş")
+
+    with st.form("login_form"):
+        password = st.text_input(
+            "Şifre",
+            type="password",
+            placeholder="Şifreyi giriniz...",
+        )
+        submitted = st.form_submit_button(
+            "Giriş Yap", use_container_width=True, type="primary"
+        )
+
+    if submitted:
+        if hmac.compare_digest(password, APP_PASSWORD):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Hatalı şifre.")
+
+    st.stop()
+
+
+# --- Ana Kontrol Paneli ---
+manager = get_mqtt_manager(MQTT_BROKER, MQTT_PORT, TOPIC_PREFIX)
+
+header_col, logout_col = st.columns([4, 1])
+with header_col:
+    st.markdown(
+        """
+        <div class="header-box">
+            <div class="logo-badge">🐾</div>
+            <h2 style="margin:0;">Akıllı Mama Kabı</h2>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with logout_col:
+    st.write("")
+    if st.button("🚪 Çıkış", use_container_width=True):
+        st.session_state.authenticated = False
+        st.rerun()
+
+
+@st.fragment(run_every="2s")
+def render_live_status():
+    state = manager.snapshot()
+    is_open = state["kapak"] == "acik"
+
+    broker_dot = "🟢" if state["broker_connected"] else "🟡"
+    broker_text = (
+        "İletişim sunucusu bağlı"
+        if state["broker_connected"]
+        else "İletişim sunucusuna bağlanılıyor..."
+    )
+
+    if state["device_online"] == "online":
+        device_badge = '<span style="color:#10B981; font-weight:700;">● Cihaz Çevrimiçi</span>'
+    elif state["device_online"] == "offline":
+        device_badge = '<span style="color:#EF4444; font-weight:700;">● Cihaz Çevrimdışı</span>'
+    else:
+        device_badge = '<span style="color:#F59E0B; font-weight:700;">● Cihaz Bekleniyor</span>'
+
+    st.markdown(
+        f"""
+        <div class="pill-row">
+            <div style="font-weight:600; font-size:14px;">{broker_dot} {broker_text}</div>
+            <div style="font-size:13px;">{device_badge}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    card_cls = "status-open" if is_open else "status-closed"
+    circle_cls = "circle-open" if is_open else "circle-closed"
+    icon = "🔓" if is_open else "🔒"
+    title_color = "#10B981" if is_open else "#F59E0B"
+    title_text = "KAPAK AÇIK" if is_open else "KAPAK KAPALI"
+    desc_text = (
+        f"Mama kabı kapağı şu an açık ({state['aci']}°)."
+        if is_open
+        else f"Mama kabı kapağı şu an kapalı ({state['aci']}°)."
+    )
+
+    st.markdown(
+        f"""
+        <div class="status-card {card_cls}">
+            <div class="muted-text" style="font-size:12px; font-weight:700; letter-spacing:1.2px; margin-bottom:14px;">
+                MAMA KABI DURUMU
+            </div>
+            <div class="circle-badge {circle_cls}">{icon}</div>
+            <div style="font-size:26px; font-weight:800; color:{title_color}; letter-spacing:0.6px;">
+                {title_text}
+            </div>
+            <div class="muted-text" style="font-size:14px; margin-top:6px;">
+                {desc_text}
+            </div>
+            <div class="metrics-bar">
+                <span>⚙️ Servo: <b>{state['aci']}°</b> ({'Açık' if is_open else 'Kapalı'})</span>
+                <span>🕒 Son İşlem: <b>{state['last_updated']}</b></span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+render_live_status()
+
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("🔓 KAPAĞI AÇ", use_container_width=True, type="primary"):
+        manager.send_command("ac")
+        time.sleep(0.35)
+        st.rerun()
+
+with col2:
+    if st.button("🔒 KAPAĞI KAPAT", use_container_width=True):
+        manager.send_command("kapat")
+        time.sleep(0.35)
+        st.rerun()
+
+if st.button(
+    "🍽️ 1 PORSİYON MAMA DÖK (1 Saniye)",
+    use_container_width=True,
+):
+    manager.send_command("besle:1")
+    time.sleep(0.35)
+    st.rerun()
